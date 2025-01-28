@@ -4,54 +4,80 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"golang.org/x/net/html"
 )
 
 var URL = "https://scrape-me.dreamsofcode.io/"
 var hmap = map[string]bool{}
+var dead = []string{}
 
 func main() {
-	resp, err := http.Get(URL)
+	// Start crawling with a depth of 5
+	links := helper(URL, 3)
+	fmt.Println("Links found:", links)
+}
+
+func helper(link string, depth int) []string {
+	if depth == 0 || hmap[link] {
+		return nil
+	}
+
+	// Mark link as visited
+	hmap[link] = true
+	fmt.Println("Crawling:", link, "at depth:", depth)
+
+	// Fetch the page
+	resp, err := http.Get(link)
 
 	if err != nil {
-		panic(err)
+		fmt.Println("Error fetching:", link, err)
+		return nil
+	}
+	if resp.StatusCode >= 400 {
+		fmt.Printf("Dead link is found %s (status %d)\n", link, resp.StatusCode)
+		dead = append(dead, link)
 	}
 	defer resp.Body.Close()
 
-	links, err := extractLinks(resp.Body)
+	// Extract links
+	links, err := extractLinks(resp.Body, link)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error extracting links from:", link, err)
+		return nil
 	}
-	for _, link := range links {
-		fmt.Println(link)
+
+	// Recursive crawling
+	res := []string{link} // Include the current link
+	for _, l := range links {
+		res = append(res, helper(l, depth-1)...)
 	}
+	return res
 }
 
-func extractLinks(body io.Reader) ([]string, error) {
+func extractLinks(body io.Reader, base string) ([]string, error) {
 	var links []string
-	// Parse into Tree Node
+
+	// Parse the HTML document
 	doc, err := html.Parse(body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse HTML %w", err)
+		return nil, fmt.Errorf("failed to parse HTML: %w", err)
 	}
+
+	// Traverse the HTML tree
 	var traverse func(*html.Node)
 	traverse = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "a" {
 			for _, attr := range n.Attr {
 				if attr.Key == "href" {
-					var link string
-					if attr.Val[:4] != "http" {
-						link = URL[:len(URL)-1] + attr.Val
-					} else {
-						link = attr.Val
+					// Resolve relative URLs
+					link, err := resolveURL(attr.Val, base)
+					if err != nil || len(link) < 5 {
+						continue
 					}
 					if !hmap[link] {
 						links = append(links, link)
-						hmap[link] = true
-						break
-					} else {
-						continue
 					}
 				}
 			}
@@ -61,5 +87,18 @@ func extractLinks(body io.Reader) ([]string, error) {
 		}
 	}
 	traverse(doc)
+
 	return links, nil
+}
+
+func resolveURL(href, base string) (string, error) {
+	u, err := url.Parse(href)
+	if err != nil {
+		return "", err
+	}
+	baseURL, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	return baseURL.ResolveReference(u).String(), nil
 }
